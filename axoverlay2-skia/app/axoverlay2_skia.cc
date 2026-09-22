@@ -18,9 +18,11 @@
 #include <glib-unix.h>
 #include <glib.h>
 #include <include/core/SkCanvas.h>
+#include <include/core/SkBitmap.h>
+#include <include/core/SkData.h>
+#include <include/core/SkImage.h>
 #include <include/core/SkColor.h>
 #include <include/core/SkColorSpace.h>
-#include <include/core/SkFont.h>
 #include <include/core/SkSurface.h>
 #include <include/gpu/ganesh/GrBackendSurface.h>
 #include <include/gpu/ganesh/GrDirectContext.h>
@@ -31,7 +33,10 @@
 #include <include/gpu/ganesh/gl/GrGLInterface.h>
 #include <map>
 #include <math.h>
+#include <stdint.h>
+#include <string.h>
 #include <syslog.h>
+#include <time.h>
 #include <vdo-error.h>
 #include <vdo-stream.h>
 
@@ -141,6 +146,7 @@ static void process_next_frame(Overlay* overlay);
 static std::unique_ptr<RenderSurface> create_render_surface(const Overlay& overlay, int dma_buf_fd);
 static void render_frame(const Overlay& overlay, RenderSurface* surface);
 static void draw_graphics(const Overlay& overlay, SkCanvas* canvas);
+static bool load_python_image();
 
 static VdoStream* vdo_event_stream;
 
@@ -156,10 +162,12 @@ static std::map<int, Overlay> overlay_table;
 static unsigned animation_state;
 static unsigned tick_period_us = 1000000 / 30;
 
+
 /* GLib main loop */
 static GMainLoop* main_loop;
 
 static std::shared_ptr<RenderContext> render_context;
+static sk_sp<SkImage> python_image;
 
 /* Enable debug logging? */
 static const bool debug = false;
@@ -178,6 +186,11 @@ int main(void) {
     render_context = create_render_context_and_make_current();
     if (!render_context) {
         syslog(LOG_ERR, "Failed to create render context");
+        goto out;
+    }
+
+    if (!load_python_image()) {
+        syslog(LOG_ERR, "Failed to load bundled python image");
         goto out;
     }
 
@@ -335,7 +348,7 @@ static int signal_callback(void* userdata) {
 static int animation_tick_callback(void* userdata) {
     (void)userdata;
 
-    /* Move the animation forward to the next frame */
+    /* Advance the pixel-art python at the rendering rate. */
     animation_state++;
 
     /* Process next frame for each existing overlay */
@@ -452,9 +465,9 @@ static void create_overlay(unsigned stream_id, unsigned stream_width, unsigned s
         return;
     }
 
-    /* Make the overlay wide enough for the message drawn by draw_graphics(). */
-    unsigned overlay_width  = stream_width / 3;
-    unsigned overlay_height = MIN(stream_width, stream_height) / 8;
+    /* Cover the complete video stream so graphics can be positioned in stream pixels. */
+    unsigned overlay_width  = stream_width;
+    unsigned overlay_height = stream_height;
 
     /*
      * For streams of high resolution, the overlay will become very big. This can
@@ -466,11 +479,7 @@ static void create_overlay(unsigned stream_id, unsigned stream_width, unsigned s
      *
      * Here we use a threshold of 4 megapixel for when to enable upscaling.
      */
-    bool use_upscale = stream_width * stream_height > 4000000;
-
-    if (use_upscale)
-        overlay_width /= 2;
-        overlay_height /= 2;
+    bool use_upscale = false;
 
     unsigned overlay_used_width = overlay_width, overlay_used_height = overlay_height;
 
@@ -751,45 +760,152 @@ static void render_frame(const Overlay& overlay, RenderSurface* surface) {
     render_context->gr_context->flushAndSubmit(GrSyncCpu::kYes);
 }
 
+[[maybe_unused]] static void draw_bitmap_text(SkCanvas* canvas,
+                                               const char* text,
+                                               float x,
+                                               float y,
+                                               float pixel) {
+    SkPaint paint;
+    paint.setColor(SkColors::kWhite);
+
+    for (; *text; ++text) {
+        uint8_t glyph[7] = {};
+
+        switch (*text) {
+        case 'A':
+            glyph[0] = 0x0e; glyph[1] = 0x11; glyph[2] = 0x11; glyph[3] = 0x1f;
+            glyph[4] = 0x11; glyph[5] = 0x11; glyph[6] = 0x11; break;
+        case 'E':
+            glyph[0] = 0x1f; glyph[1] = 0x10; glyph[2] = 0x10; glyph[3] = 0x1e;
+            glyph[4] = 0x10; glyph[5] = 0x10; glyph[6] = 0x1f; break;
+        case 'H':
+            glyph[0] = 0x11; glyph[1] = 0x11; glyph[2] = 0x11; glyph[3] = 0x1f;
+            glyph[4] = 0x11; glyph[5] = 0x11; glyph[6] = 0x11; break;
+        case 'I':
+            glyph[0] = 0x1f; glyph[1] = 0x04; glyph[2] = 0x04; glyph[3] = 0x04;
+            glyph[4] = 0x04; glyph[5] = 0x04; glyph[6] = 0x1f; break;
+        case 'K':
+            glyph[0] = 0x11; glyph[1] = 0x12; glyph[2] = 0x14; glyph[3] = 0x18;
+            glyph[4] = 0x14; glyph[5] = 0x12; glyph[6] = 0x11; break;
+        case 'L':
+            glyph[0] = 0x10; glyph[1] = 0x10; glyph[2] = 0x10; glyph[3] = 0x10;
+            glyph[4] = 0x10; glyph[5] = 0x10; glyph[6] = 0x1f; break;
+        case 'M':
+            glyph[0] = 0x11; glyph[1] = 0x1b; glyph[2] = 0x15; glyph[3] = 0x15;
+            glyph[4] = 0x11; glyph[5] = 0x11; glyph[6] = 0x11; break;
+        case 'O':
+            glyph[0] = 0x0e; glyph[1] = 0x11; glyph[2] = 0x11; glyph[3] = 0x11;
+            glyph[4] = 0x11; glyph[5] = 0x11; glyph[6] = 0x0e; break;
+        case 'N':
+            glyph[0] = 0x11; glyph[1] = 0x19; glyph[2] = 0x15; glyph[3] = 0x13;
+            glyph[4] = 0x11; glyph[5] = 0x11; glyph[6] = 0x11; break;
+        case 'P':
+            glyph[0] = 0x1e; glyph[1] = 0x11; glyph[2] = 0x11; glyph[3] = 0x1e;
+            glyph[4] = 0x10; glyph[5] = 0x10; glyph[6] = 0x10; break;
+        case 'R':
+            glyph[0] = 0x1e; glyph[1] = 0x11; glyph[2] = 0x11; glyph[3] = 0x1e;
+            glyph[4] = 0x14; glyph[5] = 0x12; glyph[6] = 0x11; break;
+        case 'S':
+            glyph[0] = 0x0f; glyph[1] = 0x10; glyph[2] = 0x10; glyph[3] = 0x0e;
+            glyph[4] = 0x01; glyph[5] = 0x01; glyph[6] = 0x1e; break;
+        case 'T':
+            glyph[0] = 0x1f; glyph[1] = 0x04; glyph[2] = 0x04; glyph[3] = 0x04;
+            glyph[4] = 0x04; glyph[5] = 0x04; glyph[6] = 0x04; break;
+        case 'U':
+            glyph[0] = 0x11; glyph[1] = 0x11; glyph[2] = 0x11; glyph[3] = 0x11;
+            glyph[4] = 0x11; glyph[5] = 0x11; glyph[6] = 0x0e; break;
+        case 'V':
+            glyph[0] = 0x11; glyph[1] = 0x11; glyph[2] = 0x11; glyph[3] = 0x11;
+            glyph[4] = 0x0a; glyph[5] = 0x0a; glyph[6] = 0x04; break;
+        case 'Y':
+            glyph[0] = 0x11; glyph[1] = 0x11; glyph[2] = 0x0a; glyph[3] = 0x04;
+            glyph[4] = 0x04; glyph[5] = 0x04; glyph[6] = 0x04; break;
+        case '!':
+            glyph[0] = 0x04; glyph[1] = 0x04; glyph[2] = 0x04; glyph[3] = 0x04;
+            glyph[4] = 0x04; glyph[5] = 0x00; glyph[6] = 0x04; break;
+        default:
+            x += 6 * pixel;
+            continue;
+        }
+
+        for (unsigned row = 0; row < 7; ++row)
+            for (unsigned column = 0; column < 5; ++column)
+                if (glyph[row] & (1u << (4 - column)))
+                    canvas->drawRect(SkRect::MakeXYWH(x + column * pixel,
+                                                      y + row * pixel,
+                                                      pixel,
+                                                      pixel),
+                                     paint);
+
+        x += 6 * pixel;
+    }
+}
+
+static bool load_python_image() {
+    auto data = SkData::MakeFromFileName("/usr/local/packages/axoverlay2_skia/python.bmp");
+    if (!data || data->size() < 54)
+        return false;
+
+    const uint8_t* bytes = static_cast<const uint8_t*>(data->data());
+    const uint32_t pixel_offset = bytes[10] | (bytes[11] << 8) | (bytes[12] << 16) |
+                                  (bytes[13] << 24);
+    const int32_t width = bytes[18] | (bytes[19] << 8) | (bytes[20] << 16) | (bytes[21] << 24);
+    const int32_t stored_height = bytes[22] | (bytes[23] << 8) | (bytes[24] << 16) |
+                                  (bytes[25] << 24);
+    const uint16_t bits_per_pixel = bytes[28] | (bytes[29] << 8);
+    if (bytes[0] != 'B' || bytes[1] != 'M' || width <= 0 || stored_height == 0 ||
+        bits_per_pixel != 32 || pixel_offset >= data->size())
+        return false;
+
+    const int32_t height = stored_height < 0 ? -stored_height : stored_height;
+    const size_t row_bytes = (size_t)width * 4;
+    const size_t bitmap_size = row_bytes * height;
+    if (pixel_offset + bitmap_size > data->size())
+        return false;
+
+    const SkImageInfo image_info = SkImageInfo::Make(width,
+                                                     height,
+                                                     kRGBA_8888_SkColorType,
+                                                     kPremul_SkAlphaType);
+    SkBitmap bitmap;
+    if (!bitmap.tryAllocPixels(image_info))
+        return false;
+
+    uint8_t* destination = static_cast<uint8_t*>(bitmap.getPixels());
+    for (int32_t row = 0; row < height; ++row) {
+        const int32_t source_row = stored_height < 0 ? row : height - row - 1;
+        const uint8_t* source = bytes + pixel_offset + (size_t)source_row * row_bytes;
+        for (int32_t column = 0; column < width; ++column) {
+            const size_t source_index = (size_t)column * 4;
+            const size_t destination_index = (size_t)row * bitmap.rowBytes() + source_index;
+            destination[destination_index] = source[source_index + 2];
+            destination[destination_index + 1] = source[source_index + 1];
+            destination[destination_index + 2] = source[source_index];
+            destination[destination_index + 3] = source[source_index + 3];
+        }
+    }
+
+    python_image = SkImages::RasterFromBitmap(bitmap);
+    return python_image != nullptr;
+}
+
 static void draw_graphics(const Overlay& overlay, SkCanvas* canvas) {
     canvas->clear(SkColors::kTransparent);
+    if (!python_image)
+        return;
 
-    /*
-     * Rescale coordinates so that (1.0, 1.0) is the bottom-right edge of the used
-     * overlay area. The padding may extend slightly past this.
-     */
-    canvas->scale((float)overlay.used_width, (float)overlay.used_height);
+    const float short_side = (float)MIN(overlay.used_width, overlay.used_height);
+    const float image_height = short_side * 0.30f;
+    const float image_width = image_height * python_image->width() / python_image->height();
+    const float travel = (float)overlay.used_width + image_width * 2.0f;
+    const float x = fmodf(animation_state * short_side * 0.003f, travel) - image_width;
+    const float bob = sinf(animation_state * 0.10f) * short_side * 0.035f;
+    const float y = (float)overlay.used_height * 0.50f + bob - image_height * 0.5f;
 
-    /* Draw the application message in the overlay's normalized coordinate space. */
-    SkPaint text_paint;
-    text_paint.setColor(SkColors::kWhite);
-    text_paint.setAntiAlias(true);
-
-    SkFont font;
-    font.setSize(0.12f);
-    canvas->drawString("Hello Vivek Kumar!", 0.04f, 0.18f, font, text_paint);
-
-    /* Animate the overlay with a simple rotation around the centre of the used
-     * area */
-    double angle_rad = M_PI * animation_state / 180.0;
-
-    canvas->translate(0.5f, 0.5f);
-    canvas->rotate((float)animation_state);
-    canvas->translate(-0.5f, -0.5f);
-
-    /* Animate colour selection */
-    float r = (float)(sin(angle_rad) * sin(angle_rad));
-    float g = (float)(cos(angle_rad) * cos(angle_rad));
-
-    /* Draw an example icon */
     SkPaint paint;
-    paint.setStyle(SkPaint::kStroke_Style);
-    paint.setStrokeWidth(0.04f);
-    paint.setColor4f({r, g, 0.0f, 1.0f});
     paint.setAntiAlias(true);
-
-    canvas->drawCircle(0.5f, 0.5f, 0.45f, paint);
-    canvas->drawCircle(0.4f, 0.4f, 0.05f, paint);
-    canvas->drawCircle(0.6f, 0.4f, 0.05f, paint);
-    canvas->drawArc(SkRect::MakeLTRB(0.2f, 0.2f, 0.8f, 0.8f), 0.0f, 180.0f, false, paint);
+    canvas->drawImageRect(python_image,
+                          SkRect::MakeXYWH(x, y, image_width, image_height),
+                          SkSamplingOptions(SkFilterMode::kLinear),
+                          &paint);
 }
