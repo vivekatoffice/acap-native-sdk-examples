@@ -20,6 +20,7 @@
 #include <include/core/SkCanvas.h>
 #include <include/core/SkColor.h>
 #include <include/core/SkColorSpace.h>
+#include <include/core/SkFont.h>
 #include <include/core/SkSurface.h>
 #include <include/gpu/ganesh/GrBackendSurface.h>
 #include <include/gpu/ganesh/GrDirectContext.h>
@@ -451,9 +452,9 @@ static void create_overlay(unsigned stream_id, unsigned stream_width, unsigned s
         return;
     }
 
-    /* In this example we scale the overlay to a given fraction of the stream size
-     */
-    unsigned overlay_size = MIN(stream_width, stream_height) / 8;
+    /* Make the overlay wide enough for the message drawn by draw_graphics(). */
+    unsigned overlay_width  = stream_width / 3;
+    unsigned overlay_height = MIN(stream_width, stream_height) / 8;
 
     /*
      * For streams of high resolution, the overlay will become very big. This can
@@ -468,9 +469,10 @@ static void create_overlay(unsigned stream_id, unsigned stream_width, unsigned s
     bool use_upscale = stream_width * stream_height > 4000000;
 
     if (use_upscale)
-        overlay_size /= 2;
+        overlay_width /= 2;
+        overlay_height /= 2;
 
-    unsigned overlay_used_width = overlay_size, overlay_used_height = overlay_size;
+    unsigned overlay_used_width = overlay_width, overlay_used_height = overlay_height;
 
     /*
      * It is important to ensure that the size is properly aligned. The
@@ -757,6 +759,15 @@ static void draw_graphics(const Overlay& overlay, SkCanvas* canvas) {
      * overlay area. The padding may extend slightly past this.
      */
     canvas->scale((float)overlay.used_width, (float)overlay.used_height);
+
+    /* Draw the application message in the overlay's normalized coordinate space. */
+    SkPaint text_paint;
+    text_paint.setColor(SkColors::kWhite);
+    text_paint.setAntiAlias(true);
+
+    SkFont font;
+    font.setSize(0.12f);
+    canvas->drawString("Hello Vivek Kumar!", 0.04f, 0.18f, font, text_paint);
 
     /* Animate the overlay with a simple rotation around the centre of the used
      * area */

@@ -32,5 +32,5 @@
  */
 int main(void) {
     /* Choose between { LOG_INFO, LOG_CRIT, LOG_WARNING, LOG_ERR }*/
-    syslog(LOG_INFO, "Hello World!");
+    syslog(LOG_INFO, "Hello Vivek Kumar!");
 }
